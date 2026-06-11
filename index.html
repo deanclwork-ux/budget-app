@@ -284,7 +284,8 @@
         <div class="box">
           <div class="box-h"><h2>💡 วิธีใช้</h2></div>
           <div style="padding:14px 18px"><p class="muted">
-            เพิ่มรายการที่ต้องจ่ายประจำ เช่น ค่าหนี้ ค่าน้ำมัน ค่ากิน ระบบจะแสดงภาพรวมว่าเดือนนี้ต้องจ่ายเท่าไหร่และจะเหลือเท่าไหร่
+            เพิ่มรายการที่ต้องจ่ายประจำ เช่น ค่าหนี้ ค่าน้ำมัน ค่ากิน เลือกความถี่ได้ (ทุกเดือน, ทุก 2–3 เดือน, ครั้งเดียว)
+            และระบุจำนวนงวดได้ เช่น ผ่อน 10 งวดแล้วหยุดอัตโนมัติ ระบบจะแสดงภาพรวมว่าเดือนนี้ต้องจ่ายเท่าไหร่และจะเหลือเท่าไหร่
             <b>โดยยังไม่หักเงินจริง</b> — เมื่อถึงเวลาจ่ายจริง กดปุ่ม <b>✓ จ่ายแล้ว</b> ระบบจึงจะบันทึกเป็นรายจ่ายจริงให้อัตโนมัติ
           </p></div>
         </div>
@@ -490,16 +491,41 @@ function deltaHTML(cur,prev,goodWhenUp=true,isPct=false){
 }
 
 /* ---------- แผนรายจ่าย: คำนวณ ---------- */
+function occursInMonth(it,m,y){
+  if(it.recur==='once')return it.month===m&&it.year===y;
+  const interval=Math.max(1,+it.interval||1);
+  if(it.startMonth==null||it.startYear==null){
+    // รายการเก่าไม่มีเดือนเริ่ม → ทุกเดือน
+    return interval===1;
+  }
+  const diff=(y*12+m)-(it.startYear*12+it.startMonth);
+  if(diff<0||diff%interval!==0)return false;
+  if(it.count&&diff/interval>=it.count)return false;
+  return true;
+}
+function occIndex(it,m,y){
+  if(it.recur==='once'||it.startMonth==null)return null;
+  const interval=Math.max(1,+it.interval||1);
+  return ((y*12+m)-(it.startYear*12+it.startMonth))/interval+1;
+}
+function recurLabel(it,idx){
+  if(it.recur==='once')return 'ครั้งเดียว';
+  const iv=Math.max(1,+it.interval||1);
+  let s=iv===1?'ทุกเดือน':'ทุก '+iv+' เดือน';
+  if(it.count&&idx)s+=' • งวด '+idx+'/'+it.count;
+  else if(it.count)s+=' • '+it.count+' งวด';
+  return s;
+}
 function plannedOccurrences(){
   const out=[];
   const months=period.mode==='year'?[...Array(12).keys()].map(m=>({m,y:period.y})):[{m:period.m,y:period.y}];
   for(const{m,y}of months){
     const mk=monthKey(y,m);
     for(const it of db.planned){
-      if(it.recur==='once'&&!(it.month===m&&it.year===y))continue;
+      if(!occursInMonth(it,m,y))continue;
       const lastDay=new Date(y,m+1,0).getDate();
       const day=Math.min(+it.dueDay||1,lastDay);
-      out.push({item:it,mk,m,y,due:new Date(y,m,day),paidExpId:it.paid[mk]||null});
+      out.push({item:it,mk,m,y,due:new Date(y,m,day),paidExpId:it.paid[mk]||null,idx:occIndex(it,m,y)});
     }
   }
   return out.sort((a,b)=>a.due-b.due);
@@ -570,7 +596,7 @@ function planRowHTML(o,compact){
     :`<button class="btn green xs" onclick="markPaid('${it.id}','${o.mk}',${o.m},${o.y})">✓ จ่ายแล้ว</button>`;
   if(compact)return`<tr><td>${esc(it.name)}</td><td><span class="pill">${esc(it.category)}</span></td>
     <td>${dueStr}</td><td class="num amount-out">${fmt(+it.amount)}</td><td>${status}</td><td>${payBtn}</td></tr>`;
-  const recurStr=it.recur==='monthly'?'ทุกเดือน':'ครั้งเดียว';
+  const recurStr=recurLabel(it,o.idx);
   return`<tr><td><b>${esc(it.name)}</b></td><td><span class="pill">${esc(it.category)}</span></td>
     <td>${recurStr}</td><td>${dueStr}</td><td class="num amount-out">${fmt(+it.amount)}</td><td>${status}</td>
     <td><div style="display:flex;gap:4px;justify-content:flex-end;align-items:center">${payBtn}
@@ -719,16 +745,26 @@ function openModal(list,mode,id){
   modalTitle.textContent=(mode==='edit'?'แก้ไข':mode==='dup'?'ทำซ้ำ':'เพิ่ม')+titles[list];
   modalSave.textContent=mode==='edit'?'บันทึกการแก้ไข':'เพิ่มรายการ';
   if(list==='planned'){
-    const v=base||{name:'',category:db.categories[0],amount:'',dueDay:1,recur:'monthly'};
+    const defM=period.mode==='month'?period.m:new Date().getMonth();
+    const defY=period.mode==='month'?period.y:new Date().getFullYear();
+    const v=base||{name:'',category:db.categories[0],amount:'',dueDay:1,recur:'monthly',interval:1,count:null,startMonth:defM,startYear:defY};
+    if(v.startMonth==null){v.startMonth=v.recur==='once'?(v.month??defM):defM;v.startYear=v.recur==='once'?(v.year??defY):defY;}
+    const recurVal=v.recur==='once'?'once':String(Math.max(1,+v.interval||1));
+    const recurOpts=[['once','ครั้งเดียว (ไม่ซ้ำ)'],['1','ทุกเดือน'],['2','ทุก 2 เดือน'],['3','ทุก 3 เดือน'],['4','ทุก 4 เดือน'],['6','ทุก 6 เดือน'],['12','ทุกปี (12 เดือน)']]
+      .map(([val,txt])=>`<option value="${val}" ${recurVal===val?'selected':''}>${txt}</option>`).join('');
+    const yNow=new Date().getFullYear();
+    const yearOpts=[];for(let y=yNow-2;y<=yNow+5;y++)yearOpts.push(`<option value="${y}" ${+v.startYear===y?'selected':''}>${y}</option>`);
+    const monthOpts=MONTHS.map((mn,i)=>`<option value="${i}" ${+v.startMonth===i?'selected':''}>${mn}</option>`).join('');
     modalFields.innerHTML=
       `<div class="f full"><label>ชื่อรายการ (เช่น ผ่อนหนี้ ค่าน้ำมัน ค่ากิน)</label><input type="text" id="mName" value="${esc(v.name)}" required></div>
        <div class="f"><label>จำนวนเงิน (฿)</label><input type="number" id="mAmount" min="0.01" step="0.01" value="${v.amount}" placeholder="0.00" required></div>
        <div class="f"><label>ครบกำหนดวันที่ (1–31)</label><input type="number" id="mDueDay" min="1" max="31" step="1" value="${v.dueDay}" required></div>
        <div class="f full"><label>หมวดหมู่</label>${selectHTML('mCat',db.categories,v.category)}</div>
-       <div class="f full"><label>ความถี่</label><select id="mRecur">
-         <option value="monthly" ${v.recur==='monthly'?'selected':''}>ทุกเดือน</option>
-         <option value="once" ${v.recur==='once'?'selected':''}>ครั้งเดียว (เฉพาะ${period.mode==='month'?MONTHS[period.m]+' '+period.y:'เดือนปัจจุบัน'})</option>
-       </select></div>`;
+       <div class="f full"><label>ความถี่</label><select id="mRecur" onchange="document.getElementById('mCountWrap').style.display=this.value==='once'?'none':'flex'">${recurOpts}</select></div>
+       <div class="f"><label>เดือนแรกที่จ่าย</label><select id="mStartM">${monthOpts}</select></div>
+       <div class="f"><label>ปี</label><select id="mStartY">${yearOpts}</select></div>
+       <div class="f full" id="mCountWrap" style="display:${recurVal==='once'?'none':'flex'}"><label>จำนวนงวด (เว้นว่าง = จ่ายต่อเนื่องไม่จำกัด เช่น ผ่อน 10 งวด ใส่ 10)</label>
+         <input type="number" id="mCount" min="1" step="1" value="${v.count||''}" placeholder="ไม่จำกัด"></div>`;
   }else{
     const isInc=list==='income';
     const v=base||{date:todayISO(),amount:'',notes:'',desc:'',
@@ -753,17 +789,24 @@ modalForm.onsubmit=e=>{
   const{list,mode,id}=modalCtx;
   let entry;
   if(list==='planned'){
-    const recur=document.getElementById('mRecur').value;
+    const rv=document.getElementById('mRecur').value;
+    const sm=+document.getElementById('mStartM').value;
+    const sy=+document.getElementById('mStartY').value;
     entry={
       name:document.getElementById('mName').value.trim(),
       category:document.getElementById('mCat').value,
       amount:+document.getElementById('mAmount').value,
-      dueDay:Math.min(31,Math.max(1,+document.getElementById('mDueDay').value||1)),
-      recur
+      dueDay:Math.min(31,Math.max(1,+document.getElementById('mDueDay').value||1))
     };
-    if(recur==='once'){
-      entry.month=period.mode==='month'?period.m:new Date().getMonth();
-      entry.year=period.mode==='month'?period.y:new Date().getFullYear();
+    if(rv==='once'){
+      entry.recur='once';entry.month=sm;entry.year=sy;
+      entry.interval=null;entry.count=null;entry.startMonth=null;entry.startYear=null;
+    }else{
+      entry.recur='monthly';entry.interval=+rv;
+      entry.startMonth=sm;entry.startYear=sy;
+      const c=+document.getElementById('mCount').value;
+      entry.count=c>0?c:null;
+      entry.month=null;entry.year=null;
     }
   }else{
     const isInc=list==='income';
